@@ -350,6 +350,6 @@ class AwmcMaimaiStatusPlugin(Star):
             yield event.plain_result("舞萌DX 状态查询失败，请稍后重试或联系管理员检查 Status 服务。")
 
 
-@register("astrbot_plugin_awmc_maimaidx_status", "Blueteemo", "舞萌DX 服务器状态查询", "1.6.0")
+@register("astrbot_plugin_awmc_maimaidx_status", "Blueteemo", "舞萌DX 服务器状态查询", "1.0.0")
 def register_plugin(context: Context, config: AstrBotConfig):
     return AwmcMaimaiStatusPlugin(context, config)
