@@ -2,8 +2,7 @@
 
 > 舞萌DX 服务器状态查询 — 基于 Uptime Kuma 心跳数据
 
-![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-blue)
-![Version](https://img.shields.io/badge/version-1.0.0-green)
+![Project](https://img.shields.io/badge/🤖-AstrBot%20Plugin-5865F2) ![Version](https://img.shields.io/badge/version-1.0.0-4CAF50) ![License](https://img.shields.io/badge/license-MIT-FF6B6B)
 
 查询 [舞萌DX](https://maimai.wahlap.com/) 各服务器的实时状态，数据来源于 AWMC 社区维护的 [Uptime Kuma](https://github.com/louislam/uptime-kuma) 监控。
 
@@ -55,7 +54,3 @@ playwright install chromium
 本插件移植自 [koishi-plugin-awmc-maimaidx-status](https://github.com/Michaelwucoc/koishi-plugin-awmc-maimaidx-status)，原作者 **[@Michaelwucoc](https://github.com/Michaelwucoc)**。
 
 状态数据由 AWMC 社区通过 [Uptime Kuma](https://github.com/louislam/uptime-kuma) 监控提供，状态页地址：[status.awmc.cc](https://status.awmc.cc)。
-
-## 许可证
-
-MIT
