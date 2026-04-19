@@ -1,0 +1,33 @@
+{
+  "base_url": {
+    "description": "Status / Uptime Kuma 反代根地址",
+    "hint": "推荐全球加速节点 miku.milkawa.xyz，也可填 status.awmc.cc 等",
+    "type": "string",
+    "default": "https://miku.milkawa.xyz"
+  },
+  "continuous_down": {
+    "description": "连续掉线心跳数阈值",
+    "hint": "连续多少个 heartbeat 为掉线(0)时显示为「离线」",
+    "type": "int",
+    "default": 3
+  },
+  "recent_minutes": {
+    "description": "近期统计时间窗口（分钟）",
+    "hint": "用于统计「近多少分钟状态」的时间窗口",
+    "type": "int",
+    "default": 15
+  },
+  "output_mode": {
+    "description": "发送状态消息的模式",
+    "hint": "text=纯文本, forward=合并转发(仅QQ), image=截图",
+    "type": "string",
+    "default": "text",
+    "options": ["text", "forward", "image"]
+  },
+  "screenshot_url": {
+    "description": "截图页面 URL",
+    "hint": "截图模式的页面地址",
+    "type": "string",
+    "default": "https://status.awmc.cc/status/maimai-lite"
+  }
+}
