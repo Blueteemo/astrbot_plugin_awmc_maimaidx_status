@@ -46,7 +46,7 @@ playwright install chromium
 ## 安装
 
 1. 在 AstrBot 管理后台 → 插件管理 → 安装插件 → 上传 ZIP
-2. 上传 `astrbot_plugin_awmc_maimaidx_status_v1.0.0.zip`
+2. 下载 [astrbot_plugin_awmc_maimaidx_status_v1.0.0.zip](https://github.com/Blueteemo/astrbot_plugin_awmc_maimaidx_status/releases/download/v1.0.0/astrbot_plugin_awmc_maimaidx_status_v1.0.0.zip) 并上传
 3. 重启 AstrBot
 
 ## 致谢
