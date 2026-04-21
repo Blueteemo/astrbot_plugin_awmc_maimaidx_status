@@ -2,7 +2,7 @@
 
 > 舞萌DX 服务器状态查询 — 基于 Uptime Kuma 心跳数据
 
-![Project](https://img.shields.io/badge/🤖-AstrBot%20Plugin-5865F2) ![Version](https://img.shields.io/badge/version-1.0.0-4CAF50) ![License](https://img.shields.io/badge/license-MIT-FF6B6B)
+![AstrBot](https://img.shields.io/badge/%F0%9F%A4%96-AstrBot%20Plugin-7289DA) ![Version](https://img.shields.io/badge/version-1.0.1-3B82F6) ![Python](https://img.shields.io/badge/python-3.10+-blue.svg) ![License](https://img.shields.io/badge/license-MIT-FF6B6B)
 
 查询 [舞萌DX](https://maimai.wahlap.com/) 各服务器的实时状态，数据来源于 AWMC 社区维护的 [Uptime Kuma](https://github.com/louislam/uptime-kuma) 监控。
 
@@ -46,7 +46,7 @@ playwright install chromium
 ## 安装
 
 1. 在 AstrBot 管理后台 → 插件管理 → 安装插件 → 上传 ZIP
-2. 下载 [astrbot_plugin_awmc_maimaidx_status_v1.0.0.zip](https://github.com/Blueteemo/astrbot_plugin_awmc_maimaidx_status/releases/download/v1.0.0/astrbot_plugin_awmc_maimaidx_status_v1.0.0.zip) 并上传
+2. 下载[最新版本 zip](https://github.com/Blueteemo/astrbot_plugin_awmc_maimaidx_status/releases)并上传
 3. 重启 AstrBot
 
 ## 致谢
