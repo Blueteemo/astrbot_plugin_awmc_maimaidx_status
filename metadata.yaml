@@ -5,8 +5,4 @@ version: 1.0.0
 author: Blueteemo
 repo: https://github.com/Blueteemo/astrbot_plugin_awmc_maimaidx_status
 display_name: 舞萌DX 状态查询
-support_platforms:
-  - aiocqhttp
-  - qq_official
-  - telegram
-  - discord
+astrbot_version: ">=4.16.0"
