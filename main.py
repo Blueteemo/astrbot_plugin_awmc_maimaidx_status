@@ -3,23 +3,30 @@ import copy
 import time
 from time import monotonic
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, NamedTuple
+from pathlib import Path
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig, logger
 
 
+class ImageSnapshot(NamedTuple):
+    content: bytes | str
+    generated_at: float
+    source: str
+
+
 class AwmcMaimaiStatusPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.base_url = config.get("base_url", "https://mai.chongxi.us").rstrip("/")
+        self.base_url = self.display_text(config.get("base_url"), "https://mai.chongxi.us").rstrip("/")
         # Migrate only known old defaults; preserve explicitly configured proxies.
         if self.base_url in {"https://miku.milkawa.xyz", "https://status.awmc.cc"}:
             self.base_url = "https://mai.chongxi.us"
         self.output_mode = config.get("output_mode", "text")
-        self.screenshot_url = config.get("screenshot_url", "https://mai.chongxi.us")
+        self.screenshot_url = self.display_text(config.get("screenshot_url"), "https://mai.chongxi.us")
         if self.screenshot_url.rstrip("/") in {
             "https://status.awmc.cc/status/maimai-lite",
             "https://status.awmc.cc/status/maimai",
@@ -27,8 +34,7 @@ class AwmcMaimaiStatusPlugin(Star):
             self.screenshot_url = "https://mai.chongxi.us"
 
         # 截图缓存
-        self._last_screenshot_url: Optional[str] = None
-        self._last_screenshot_time: float = 0
+        self._image_cache: Optional[ImageSnapshot] = None
         self._cache_minutes = 5  # 截图缓存5分钟
         self._screenshot_cached_at = 0.0
         self._screenshot_task: Optional[asyncio.Task] = None
@@ -137,19 +143,19 @@ class AwmcMaimaiStatusPlugin(Star):
         )
         return blocks
 
-    async def get_screenshot_url(self) -> Optional[str]:
-        """获取状态页截图URL，带缓存"""
-        if self._last_screenshot_url and (
+    async def get_image_snapshot(self) -> Optional[ImageSnapshot]:
+        """获取图片及其生成时间、来源的不可变快照。"""
+        if self._image_cache and (
             monotonic() - self._screenshot_cached_at < self._cache_minutes * 60
         ):
             logger.info("使用缓存的截图")
-            return self._last_screenshot_url
+            return self._image_cache
         if self._screenshot_task is None or self._screenshot_task.done():
             self._screenshot_task = asyncio.create_task(self._capture_or_render_image())
             self._screenshot_task.add_done_callback(self._consume_task_exception)
         return await asyncio.shield(self._screenshot_task)
 
-    async def _capture_or_render_image(self) -> Optional[str]:
+    async def _capture_or_render_image(self) -> Optional[ImageSnapshot]:
         try:
             # 使用 playwright 直接截图外部网页
             from playwright.async_api import async_playwright
@@ -205,21 +211,12 @@ class AwmcMaimaiStatusPlugin(Star):
                 finally:
                     await browser.close()
 
-            # 保存到插件数据目录
-            import os
-            data_dir = os.path.join("data", "plugin_data", "astrbot_plugin_awmc_maimaidx_status")
-            os.makedirs(data_dir, exist_ok=True)
-            screenshot_path = os.path.join(data_dir, "screenshot.png")
-
-            with open(screenshot_path, "wb") as f:
-                f.write(screenshot_bytes)
-
-            # 更新缓存
-            self._last_screenshot_url = screenshot_path
-            self._last_screenshot_time = time.time()
-            self._screenshot_cached_at = monotonic()
-
-            return screenshot_path
+            source = (
+                "数据来源于 isMaiDown by Chongxi · https://mai.chongxi.us"
+                if self.screenshot_url.rstrip("/") == "https://mai.chongxi.us"
+                else f"截图页面：{self.screenshot_url}"
+            )
+            return self._cache_image(screenshot_bytes, source)
 
         except Exception as e:
             logger.error(f"Playwright 截图失败: {e}")
@@ -230,13 +227,20 @@ class AwmcMaimaiStatusPlugin(Star):
                 full_text = "\n\n".join(group_blocks)
                 url = await self.text_to_image(full_text)
                 if url:
-                    self._last_screenshot_url = url
-                    self._last_screenshot_time = time.time()
-                    self._screenshot_cached_at = monotonic()
-                    return url
+                    # Freeze local render files too; remote renderer URLs remain supported.
+                    content = url if url.startswith(("https://", "http://")) else Path(url).read_bytes()
+                    return self._cache_image(
+                        content, "数据来源于 isMaiDown by Chongxi · https://mai.chongxi.us"
+                    )
             except Exception as e2:
                 logger.error(f"text_to_image 也失败: {e2}")
             return None
+
+    def _cache_image(self, content: bytes | str, source: str) -> ImageSnapshot:
+        snapshot = ImageSnapshot(content, time.time(), source)
+        self._image_cache = snapshot
+        self._screenshot_cached_at = monotonic()
+        return snapshot
 
     @filter.command("mais")
     async def maidx_status(self, event: AstrMessageEvent, mode: str = ""):
@@ -254,14 +258,18 @@ class AwmcMaimaiStatusPlugin(Star):
             # 图片模式
             if use_image:
                 yield event.plain_result("正在获取截图，请稍候...")
-                screenshot_url = await self.get_screenshot_url()
-                if screenshot_url:
+                snapshot = await self.get_image_snapshot()
+                if snapshot:
                     yield event.plain_result(
-                        f"图片生成：{self.format_timestamp(self._last_screenshot_time)}"
+                        f"图片生成：{self.format_timestamp(snapshot.generated_at)}"
                         f"（最多缓存{self._cache_minutes}分钟）\n"
-                        "数据来源于 isMaiDown by Chongxi · https://mai.chongxi.us"
+                        f"{snapshot.source}"
                     )
-                    yield event.image_result(screenshot_url)
+                    if isinstance(snapshot.content, bytes):
+                        from astrbot.api.message_components import Image
+                        yield event.chain_result([Image.fromBytes(snapshot.content)])
+                    else:
+                        yield event.image_result(snapshot.content)
                 else:
                     yield event.plain_result("截图失败，已切换到文本模式...")
                     # 失败时回退到文本

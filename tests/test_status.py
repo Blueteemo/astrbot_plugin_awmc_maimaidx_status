@@ -29,18 +29,27 @@ class StatusTests(unittest.TestCase):
     def test_preserve_custom(self):
         p=plugin.AwmcMaimaiStatusPlugin(None,{'base_url':'https://example.org/','screenshot_url':'https://example.org/status'})
         self.assertEqual(p.base_url,'https://example.org'); self.assertEqual(p.screenshot_url,'https://example.org/status')
+    def test_null_empty_and_non_string_urls(self):
+        for value in (None, '', '   ', 0, False, [], {}):
+            with self.subTest(value=value):
+                p=plugin.AwmcMaimaiStatusPlugin(None,{'base_url':value,'screenshot_url':value})
+                self.assertEqual(p.base_url,'https://mai.chongxi.us')
+                self.assertEqual(p.screenshot_url,'https://mai.chongxi.us')
+
     def test_verdict_over_legacy(self):
         s=self.text(status='normal',verdict='recovering',services=[])
         self.assertIn('总体状态：🟨恢复中',s)
     def test_all_states(self):
-        for state in ('normal','ok','recovering','degraded','outage','down','maintenance','nodata'):
-            self.assertNotIn('未知',self.p.status_label(state))
+        for state, label in {'normal':'🟩正常','ok':'🟩正常','recovering':'🟨恢复中',
+                             'degraded':'🟨性能下降','outage':'🟥宕机','down':'🟥宕机',
+                             'maintenance':'🟦维护中','nodata':'⬜暂无数据'}.items():
+            with self.subTest(state=state): self.assertEqual(self.p.status_label(state),label)
     def test_unknown_is_not_normal(self): self.assertEqual(self.p.status_label('new'),'⬜未知')
     def test_no_services(self): self.assertIn('暂无服务数据',self.text(services=[]))
     def test_nullable_fields(self):
         s=self.text(services=[None,{'name':'NET','state':'nodata','latency':None}],broadcast=None,reports=None)
         self.assertNotIn('当前延迟',s)
-    def test_zero_latency(self): self.assertIn('0 ms',self.text(services=[{'latency':0}]))
+    def test_zero_latency(self): self.assertIn('  当前延迟：0 ms',self.text(services=[{'latency':0}]).splitlines())
     def test_invalid_latency(self):
         for value in (-1,True,float('nan'),float('inf'),'5'):
             self.assertNotIn('当前延迟',self.text(services=[{'latency':value}]))
@@ -65,8 +74,8 @@ class FetchTests(unittest.IsolatedAsyncioTestCase):
             for default,mode,wanted in [('text','','text'),('text','forward','chain'),('image','text','text'),('forward','image','image')]:
                 p=plugin.AwmcMaimaiStatusPlugin(None,{'output_mode':default})
                 async def blocks(): return ['title','services','source']
-                async def image(): return '/tmp/image.png'
-                p.build_status_blocks=blocks; p.get_screenshot_url=image
+                async def image(): return plugin.ImageSnapshot('https://example.org/image.png',1000,'source')
+                p.build_status_blocks=blocks; p.get_image_snapshot=image
                 results=[r async for r in p.maidx_status(Event(),mode)]
                 self.assertEqual(results[-1][0],wanted)
     async def test_image_failure_falls_back(self):
@@ -75,7 +84,7 @@ class FetchTests(unittest.IsolatedAsyncioTestCase):
         p=plugin.AwmcMaimaiStatusPlugin(None,{})
         async def image(): return None
         async def blocks(): return ['text fallback']
-        p.get_screenshot_url=image; p.build_status_blocks=blocks
+        p.get_image_snapshot=image; p.build_status_blocks=blocks
         results=[r async for r in p.maidx_status(Event(),'image')]
         self.assertEqual(results[-1],'text fallback')
     async def test_http_and_schema(self):
@@ -179,9 +188,9 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0)
             return None
         self.p._capture_or_render_image = AsyncMock(side_effect=fail)
-        self.assertEqual(await asyncio.gather(*(self.p.get_screenshot_url() for _ in range(4))), [None]*4)
+        self.assertEqual(await asyncio.gather(*(self.p.get_image_snapshot() for _ in range(4))), [None]*4)
         self.assertEqual(self.p._capture_or_render_image.await_count, 1)
-        self.assertIsNone(await self.p.get_screenshot_url())
+        self.assertIsNone(await self.p.get_image_snapshot())
         self.assertEqual(self.p._capture_or_render_image.await_count, 2)
     async def test_failure_does_not_cache_or_return_expired_data(self):
         with patch.object(plugin, "monotonic", return_value=100) as clock:
@@ -207,23 +216,19 @@ class CacheTests(unittest.IsolatedAsyncioTestCase):
     async def test_screenshot_cache_expiry_and_lock(self):
         async def capture():
             await asyncio.sleep(0)
-            self.p._last_screenshot_url = "image.png"
-            self.p._screenshot_cached_at = plugin.monotonic()
-            self.p._last_screenshot_time = 1000
-            return "image.png"
+            return self.p._cache_image("https://example.org/image.png", "source")
         self.p._capture_or_render_image = AsyncMock(side_effect=capture)
         with patch.object(plugin, "monotonic", return_value=100) as clock:
-            await asyncio.gather(*(self.p.get_screenshot_url() for _ in range(4)))
+            await asyncio.gather(*(self.p.get_image_snapshot() for _ in range(4)))
             self.assertEqual(self.p._capture_or_render_image.await_count, 1)
             clock.return_value = 399
-            await self.p.get_screenshot_url()
+            await self.p.get_image_snapshot()
             self.assertEqual(self.p._capture_or_render_image.await_count, 1)
             clock.return_value = 400
-            await self.p.get_screenshot_url()
+            await self.p.get_image_snapshot()
             self.assertEqual(self.p._capture_or_render_image.await_count, 2)
     async def test_image_caption_contains_time_and_source(self):
-        self.p._last_screenshot_time = 1000
-        self.p.get_screenshot_url = AsyncMock(return_value="image.png")
+        self.p.get_image_snapshot = AsyncMock(return_value=plugin.ImageSnapshot("image.png",1000,"isMaiDown by Chongxi"))
         event = types.SimpleNamespace(plain_result=lambda t:("text",t),image_result=lambda p:("image",p))
         result = [r async for r in self.p.maidx_status(event, "image")]
         self.assertIn("00:16:40 UTC", result[-2][1])
@@ -268,11 +273,64 @@ class FailureTests(unittest.IsolatedAsyncioTestCase):
         p.build_status_blocks = AsyncMock(return_value=["source and status"])
         p.text_to_image = AsyncMock(return_value="https://example.org/image.png")
         with patch.dict(sys.modules,{"playwright.async_api":types.SimpleNamespace(async_playwright=Manager)}):
-            result = await p.get_screenshot_url()
+            result = await p.get_image_snapshot()
         browser.close.assert_awaited_once()
-        self.assertEqual(result, "https://example.org/image.png")
-        self.assertGreater(p._last_screenshot_time, 0)
-        self.assertEqual(await p.get_screenshot_url(), result)
+        self.assertEqual(result.content, "https://example.org/image.png")
+        self.assertGreater(result.generated_at, 0)
+        self.assertIn("isMaiDown by Chongxi", result.source)
+        self.assertEqual(await p.get_image_snapshot(), result)
         p.text_to_image.assert_awaited_once()
+
+class ImageSnapshotTests(unittest.IsolatedAsyncioTestCase):
+    def browser(self, page):
+        browser=types.SimpleNamespace(new_context=AsyncMock(return_value=types.SimpleNamespace(new_page=AsyncMock(return_value=page))),close=AsyncMock())
+        pw=types.SimpleNamespace(chromium=types.SimpleNamespace(launch=AsyncMock(return_value=browser)))
+        class Manager:
+            async def __aenter__(self): return pw
+            async def __aexit__(self,*args): pass
+        return types.SimpleNamespace(async_playwright=Manager),browser
+    def page(self):
+        return types.SimpleNamespace(add_init_script=AsyncMock(),set_viewport_size=AsyncMock(),
+            goto=AsyncMock(return_value=types.SimpleNamespace(status=200)),wait_for_timeout=AsyncMock(),
+            screenshot=AsyncMock(side_effect=[b'first image',b'second image']))
+    async def test_delayed_send_keeps_image_time_and_source_after_refresh(self):
+        p=plugin.AwmcMaimaiStatusPlugin(None,{'screenshot_url':'https://example.org/status'})
+        page=self.page(); pw,browser=self.browser(page)
+        event=types.SimpleNamespace(plain_result=lambda t:('text',t),chain_result=lambda c:('chain',c))
+        components=types.SimpleNamespace(Image=types.SimpleNamespace(fromBytes=lambda b:('bytes',b)))
+        with patch.dict(sys.modules,{'playwright.async_api':pw,'astrbot.api.message_components':components}), patch.object(plugin,'monotonic',return_value=100) as clock, patch.object(plugin.time,'time',return_value=1000) as wall, patch('builtins.open',side_effect=AssertionError('must not write screenshot')):
+            first=p.maidx_status(event,'image')
+            await anext(first)
+            caption=await anext(first)
+            self.assertIn('00:16:40 UTC',caption[1])
+            self.assertIn('截图页面：https://example.org/status',caption[1])
+            self.assertNotIn('isMaiDown',caption[1])
+            clock.return_value=400; wall.return_value=1300
+            second=[r async for r in p.maidx_status(event,'image')]
+            self.assertIn('00:21:40 UTC',second[-2][1])
+            self.assertEqual(second[-1],('chain',[('bytes',b'second image')]))
+            self.assertEqual(await anext(first),('chain',[('bytes',b'first image')]))
+            await first.aclose()
+        self.assertEqual(browser.close.await_count,2)
+    async def test_default_screenshot_attribution(self):
+        p=plugin.AwmcMaimaiStatusPlugin(None,{})
+        pw,_=self.browser(self.page())
+        with patch.dict(sys.modules,{'playwright.async_api':pw}):
+            snapshot=await p.get_image_snapshot()
+        self.assertIn('isMaiDown by Chongxi',snapshot.source)
+        self.assertEqual(snapshot.content,b'first image')
+        with self.assertRaises(AttributeError): snapshot.generated_at=0
+    async def test_custom_page_fallback_preserves_api_attribution_and_local_bytes(self):
+        p=plugin.AwmcMaimaiStatusPlugin(None,{'screenshot_url':'https://example.org/status'})
+        page=self.page();page.goto.side_effect=TimeoutError()
+        pw,_=self.browser(page)
+        p.build_status_blocks=AsyncMock(return_value=['isMaiDown status'])
+        p.text_to_image=AsyncMock(return_value='/tmp/renderer.png')
+        with patch.dict(sys.modules,{'playwright.async_api':pw}), patch.object(Path,'read_bytes',return_value=b'rendered API text') as read:
+            snapshot=await p.get_image_snapshot()
+        read.assert_called_once()
+        self.assertEqual(snapshot.content,b'rendered API text')
+        self.assertIn('isMaiDown by Chongxi',snapshot.source)
+        self.assertNotIn('example.org/status',snapshot.source)
 
 if __name__ == "__main__": unittest.main()

@@ -36,7 +36,7 @@
 
 文本及合并转发共用 30 秒短缓存，并显示数据获取时间；上游返回数据时间时会另行显示。失败请求不作为成功缓存，也不回退为过期状态。
 
-`image` 模式使用 [Playwright](https://playwright.dev/) 对状态页进行浏览器截图。图片最多缓存 5 分钟，发送时注明图片生成时间和来源。并发查询会复用同一请求/图片，避免重复访问。需要额外安装依赖：
+`image` 模式使用 [Playwright](https://playwright.dev/) 对状态页进行浏览器截图。图片最多缓存 5 分钟，发送时注明图片生成时间和来源。网页截图以不可变内存快照缓存，不重复写入共享截图文件；自定义页面标注实际截图地址，文字转图回退仍标注 API 数据来源。并发查询会复用同一请求/图片，避免重复访问。需要额外安装依赖：
 
 ```bash
 pip install playwright
@@ -57,7 +57,7 @@ playwright install chromium
 
 ## 从 1.0.x 升级
 
-保留插件标识、仓库名称及 `/mais` 命令，不需要另装插件。已保存的旧默认 API 地址（`miku.milkawa.xyz`、`status.awmc.cc`）及 AWMC 默认截图地址会在运行时切换至 isMaiDown；不改写配置文件。自定义代理地址会保留，但需要改为支持 `/api/bot` 的新接口，旧 Uptime Kuma 协议不再支持。
+保留插件标识、仓库名称及 `/mais` 命令，不需要另装插件。已保存的旧默认 API 地址（`miku.milkawa.xyz`、`status.awmc.cc`）及 AWMC 默认截图地址会在运行时切换至 isMaiDown；不改写配置文件。空值、空白及非字符串地址使用默认地址。自定义代理地址会保留，但需要改为支持 `/api/bot` 的新接口，旧 Uptime Kuma 协议不再支持。
 
 新接口不提供旧版的心跳序列和 24 小时可用率，因此不再显示对应统计，`continuous_down`、`recent_minutes` 旧配置不再生效。总状态以 `verdict` 为准；未知状态不会按正常处理。接口说明见 [isMaiDown API 文档](https://mai.chongxi.us/docs/api-reference/status)。
 
