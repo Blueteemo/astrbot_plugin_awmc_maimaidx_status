@@ -1,216 +1,159 @@
+import asyncio
+import copy
 import time
-from typing import Any, Optional
-from datetime import datetime
-from dataclasses import dataclass
+from time import monotonic
+from datetime import datetime, timezone
+from typing import Optional
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import AstrBotConfig, logger
 
 
-@dataclass
-class HeartbeatEntry:
-    time: int
-    status: int
-    msg: Optional[str] = None
-    ping: Optional[int] = None
-
-
 class AwmcMaimaiStatusPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.base_url = config.get("base_url", "https://miku.milkawa.xyz").rstrip("/")
-        self.continuous_down = config.get("continuous_down", 3)
-        self.recent_minutes = config.get("recent_minutes", 15)
+        self.base_url = config.get("base_url", "https://mai.chongxi.us").rstrip("/")
+        # Migrate only known old defaults; preserve explicitly configured proxies.
+        if self.base_url in {"https://miku.milkawa.xyz", "https://status.awmc.cc"}:
+            self.base_url = "https://mai.chongxi.us"
         self.output_mode = config.get("output_mode", "text")
-        self.screenshot_url = config.get("screenshot_url", "https://status.awmc.cc/status/maimai-lite")
-        
+        self.screenshot_url = config.get("screenshot_url", "https://mai.chongxi.us")
+        if self.screenshot_url.rstrip("/") in {
+            "https://status.awmc.cc/status/maimai-lite",
+            "https://status.awmc.cc/status/maimai",
+        }:
+            self.screenshot_url = "https://mai.chongxi.us"
+
         # 截图缓存
         self._last_screenshot_url: Optional[str] = None
         self._last_screenshot_time: float = 0
         self._cache_minutes = 5  # 截图缓存5分钟
+        self._screenshot_cached_at = 0.0
+        self._screenshot_task: Optional[asyncio.Task] = None
+        self._status_cache: Optional[dict] = None
+        self._status_cached_at = 0.0
+        self._status_fetched_at = 0.0
+        self._status_cache_seconds = 30
+        self._status_task: Optional[asyncio.Task] = None
 
-    def parse_heartbeat_time(self, t: Any) -> int:
-        if isinstance(t, (int, float)):
-            return int(t)
-        s = str(t).strip().replace(" ", "T")
-        if not s.endswith("Z"):
-            s += "Z"
-        try:
-            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-            return int(dt.timestamp() * 1000)
-        except:
-            return 0
+    @staticmethod
+    def status_label(state: object) -> str:
+        if not isinstance(state, str):
+            return "⬜未知"
+        return {
+            "normal": "🟩正常", "ok": "🟩正常",
+            "recovering": "🟨恢复中", "degraded": "🟨性能下降",
+            "outage": "🟥宕机", "down": "🟥宕机",
+            "maintenance": "🟦维护中", "nodata": "⬜暂无数据",
+        }.get(state, "⬜未知")
 
-    def normalize_heartbeat_list(self, raw_list: Optional[list]) -> list:
-        if not raw_list or not isinstance(raw_list, list):
-            return []
-        result = []
-        for e in raw_list:
-            entry = HeartbeatEntry(
-                time=self.parse_heartbeat_time(e.get("time", 0)),
-                status=e.get("status", 0),
-                msg=e.get("msg"),
-                ping=e.get("ping")
-            )
-            result.append(entry)
-        return result
+    @staticmethod
+    def _consume_task_exception(task: asyncio.Task) -> None:
+        # Retrieve errors even when all waiting commands have been cancelled.
+        if not task.cancelled():
+            task.exception()
 
-    def strip_html(self, html: str) -> str:
-        import re
-        text = re.sub(r"<br\s*/?>", "\n", html, flags=re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", "", text)
-        text = text.replace("&nbsp;", " ").replace("&lt;", "<").replace("&gt;", ">")
-        text = text.replace("&amp;", "&").replace("&#39;", "'").replace("&quot;", '"')
-        return text.strip()
+    async def fetch_status(self) -> dict:
+        if self._status_cache is not None and (
+            monotonic() - self._status_cached_at < self._status_cache_seconds
+        ):
+            return copy.deepcopy(self._status_cache)
+        # Concurrent callers share success or failure, without caching failures.
+        if self._status_task is None or self._status_task.done():
+            self._status_task = asyncio.create_task(self._refresh_status())
+            self._status_task.add_done_callback(self._consume_task_exception)
+        return copy.deepcopy(await asyncio.shield(self._status_task))
 
-    def get_recent_heartbeats(self, entries: list, recent_ms: int) -> list:
-        cutoff = int(time.time() * 1000) - recent_ms
-        return [e for e in entries if e.time >= cutoff]
+    async def _refresh_status(self) -> dict:
+        data = await self._request_status()
+        self._status_cache = copy.deepcopy(data)
+        self._status_cached_at = monotonic()
+        self._status_fetched_at = time.time()
+        return data
 
-    def format_status(self, monitor: dict, entries: Optional[list], uptime_24_ratio: Optional[float]) -> list:
-        lines = []
-        entries = entries or []
-        last = entries[-1] if entries else None
-        recent_ms = self.recent_minutes * 60 * 1000
-        recent = self.get_recent_heartbeats(entries, recent_ms)
-        uptime_24h = uptime_24_ratio * 100 if uptime_24_ratio is not None else None
-
-        status_emoji = "⬜"
-        status_text = "未知"
-
-        if not entries or not last:
-            status_emoji = "⬜"
-            status_text = "未知"
-        else:
-            n = self.continuous_down
-            last_n = entries[-n:]
-            is_offline = len(last_n) >= n and all(e.status == 0 for e in last_n)
-
-            if is_offline:
-                status_emoji = "🟥"
-                status_text = "离线"
-            elif last.status == 0:
-                status_emoji = "🟨"
-                status_text = "不稳定"
-            elif last.status == 2:
-                status_emoji = "🟨"
-                status_text = "不稳定"
-            elif last.status == 3:
-                status_emoji = "🟦"
-                status_text = "维护中"
-            else:
-                status_emoji = "🟩"
-                status_text = "在线"
-
-        lines.append(f"  {monitor.get('name', 'Unknown')}")
-        lines.append(f"    状态：{status_emoji}{status_text}")
-
-        if uptime_24h is not None:
-            lines.append(f"    24小时可用率：{round(uptime_24h)}%")
-        else:
-            lines.append("    24小时可用率：暂无数据")
-
-        if recent:
-            recent_total = len(recent)
-            recent_down = sum(1 for e in recent if e.status == 0)
-            recent_down_ratio = recent_down / recent_total
-
-            if recent_down_ratio == 0:
-                recent_summary = f"近{self.recent_minutes}分钟全部正常"
-            elif recent_down_ratio < 0.3:
-                recent_summary = f"近{self.recent_minutes}分钟偶发波动"
-            elif recent_down_ratio < 0.8:
-                recent_summary = f"近{self.recent_minutes}分钟较多异常"
-            else:
-                recent_summary = f"近{self.recent_minutes}分钟持续异常"
-
-            lines.append(f"    {recent_summary}")
-            recent_pings = [e.ping for e in recent if e.status != 0 and e.ping and e.ping > 0]
-            if recent_pings:
-                avg_ping = round(sum(recent_pings) / len(recent_pings))
-                lines.append(f"    近{self.recent_minutes}分钟平均 Ping：{avg_ping} ms")
-        else:
-            lines.append(f"    近{self.recent_minutes}分钟：暂无心跳数据")
-
-        if last and last.status != 0 and last.ping and last.ping > 0:
-            lines.append(f"    当前 Ping：{last.ping} ms")
-
-        return lines
-
-    async def fetch_status(self) -> tuple:
+    async def _request_status(self) -> dict:
         import aiohttp
-        status_page_url = f"{self.base_url}/api/status-page/maimai"
-        heartbeat_url = f"{self.base_url}/api/status-page/heartbeat/maimai"
-
         async with aiohttp.ClientSession() as session:
-            async with session.get(status_page_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                page_json = await resp.json()
-            async with session.get(heartbeat_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                heartbeat_json = await resp.json()
+            async with session.get(
+                f"{self.base_url}/api/bot", timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+        if not isinstance(data, dict) or not isinstance(data.get("services"), list):
+            raise ValueError("isMaiDown 响应缺少 services 列表")
+        return data
 
-        return page_json, heartbeat_json
+    @staticmethod
+    def display_text(value: object, default: str = "") -> str:
+        return value.strip() if isinstance(value, str) and value.strip() else default
+
+    @staticmethod
+    def format_timestamp(timestamp: float) -> str:
+        return datetime.fromtimestamp(timestamp, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    def format_status_blocks(self, data: dict) -> list:
+        # verdict is authoritative; the legacy status can say normal while recovering.
+        verdict = data.get("verdict", "nodata")
+        blocks = [f"舞萌DX 服务器状态\n总体状态：{self.status_label(verdict)}"]
+        timestamp = self.display_text(data.get("timestamp"))
+        if timestamp:
+            blocks[0] += f"\n数据时间：{timestamp}"
+        services = data.get("services", [])
+        service_lines = ["【服务状态】"]
+        for service in services if isinstance(services, list) else []:
+            if not isinstance(service, dict):
+                continue
+            name = self.display_text(service.get("name")) or self.display_text(service.get("key"), "未知服务")
+            service_lines.append(
+                f"{name}："
+                f"{self.status_label(service.get('state'))}"
+            )
+            latency = service.get("latency")
+            if isinstance(latency, (int, float)) and not isinstance(latency, bool) and 0 <= latency < float('inf'):
+                service_lines.append(f"  当前延迟：{latency} ms")
+            if isinstance(service.get("duration_text"), str) and service["duration_text"]:
+                service_lines.append(f"  {service['duration_text']}")
+        if len(service_lines) == 1:
+            service_lines.append("暂无服务数据")
+        blocks.append("\n".join(service_lines))
+        reports = data.get("reports")
+        if isinstance(reports, dict):
+            counts = [reports.get("anomaly_count"), reports.get("normal_count")]
+            if all(isinstance(n, int) and not isinstance(n, bool) and n >= 0 for n in counts):
+                blocks.append(f"【近1小时玩家上报】\n异常 {counts[0]} 条，正常 {counts[1]} 条（不等同于服务宕机次数）")
+        broadcast = data.get("broadcast")
+        if isinstance(broadcast, dict) and isinstance(broadcast.get("msg"), str) and broadcast["msg"].strip():
+            blocks.append("【公告】\n" + broadcast["msg"].strip())
+        blocks.append("数据来源于 isMaiDown by Chongxi\nhttps://mai.chongxi.us")
+        return blocks
 
     async def build_status_blocks(self) -> list:
-        """获取并格式化所有状态数据，返回分组列表"""
-        page_json, heartbeat_json = await self.fetch_status()
-
-        groups = page_json.get("publicGroupList", [])
-        heartbeat_map = heartbeat_json.get("heartbeatList", {})
-        title = page_json.get("config", {}).get("title", "maimaiDX Server Status Regen")
-
-        group_blocks = [title]
-
-        incidents = page_json.get("incidents", [])
-        active_incidents = [i for i in incidents if i.get("active") is not False]
-        if active_incidents:
-            incident_lines = ["【公告】"]
-            for inc in active_incidents:
-                incident_lines.append(inc.get("title", ""))
-                if inc.get("content"):
-                    incident_lines.append(self.strip_html(inc["content"]))
-            group_blocks.append("\n".join(incident_lines))
-
-        maintenance_list = page_json.get("maintenanceList", [])
-        active_maintenance = [m for m in maintenance_list if m.get("status") == "under-maintenance" or m.get("active") is True]
-        if active_maintenance:
-            maint_lines = ["【维护】"]
-            for m in active_maintenance:
-                maint_lines.append(m.get("title", ""))
-                if m.get("description"):
-                    maint_lines.append(self.strip_html(m["description"]))
-                dr = m.get("dateRange", [])
-                if len(dr) == 2:
-                    maint_lines.append(f"时间：{dr[0]} ～ {dr[1]}")
-            group_blocks.append("\n".join(maint_lines))
-
-        uptime_list = heartbeat_json.get("uptimeList", {})
-        for group in sorted(groups, key=lambda x: x.get("weight", 0)):
-            block_lines = [group.get("name", "Unknown")]
-            for monitor in group.get("monitorList", []):
-                key = str(monitor.get("id"))
-                raw_list = heartbeat_map.get(key, [])
-                list_entries = self.normalize_heartbeat_list(raw_list)
-                ratio24 = uptime_list.get(f"{monitor.get('id')}_24")
-                ratio = ratio24 if isinstance(ratio24, (int, float)) and ratio24 == ratio24 else None
-                block_lines.extend(self.format_status(monitor, list_entries, ratio))
-            group_blocks.append("\n".join(block_lines))
-
-        return group_blocks
+        blocks = self.format_status_blocks(await self.fetch_status())
+        blocks[0] += (
+            f"\n数据获取：{self.format_timestamp(self._status_fetched_at)}"
+            f"（{self._status_cache_seconds}秒内复用）"
+        )
+        return blocks
 
     async def get_screenshot_url(self) -> Optional[str]:
         """获取状态页截图URL，带缓存"""
-        # 检查缓存
-        now = time.time()
-        if self._last_screenshot_url and (now - self._last_screenshot_time) < self._cache_minutes * 60:
+        if self._last_screenshot_url and (
+            monotonic() - self._screenshot_cached_at < self._cache_minutes * 60
+        ):
             logger.info("使用缓存的截图")
             return self._last_screenshot_url
+        if self._screenshot_task is None or self._screenshot_task.done():
+            self._screenshot_task = asyncio.create_task(self._capture_or_render_image())
+            self._screenshot_task.add_done_callback(self._consume_task_exception)
+        return await asyncio.shield(self._screenshot_task)
 
+    async def _capture_or_render_image(self) -> Optional[str]:
         try:
             # 使用 playwright 直接截图外部网页
             from playwright.async_api import async_playwright
-            
+
             async with async_playwright() as p:
                 browser = await p.chromium.launch(
                     headless=True,
@@ -219,63 +162,68 @@ class AwmcMaimaiStatusPlugin(Star):
                         '--disable-font-subpixel-positioning',
                     ]
                 )
-                context = await browser.new_context(
-                    locale='zh-CN',
-                )
-                page = await context.new_page()
-                
-                # 注入中文字体 CSS（使用 Google Fonts Noto Sans SC）
-                await page.add_init_script('''
-                    // 等待 DOM 加载后注入字体
-                    document.addEventListener('DOMContentLoaded', function() {
-                        const link = document.createElement('link');
-                        link.href = 'https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap';
-                        link.rel = 'stylesheet';
-                        document.head.appendChild(link);
-                        
-                        // 设置全局字体
-                        const style = document.createElement('style');
-                        style.textContent = `
-                            * {
-                                font-family: 'Noto Sans SC', 'Microsoft YaHei', 'SimHei', 'PingFang SC', sans-serif !important;
-                            }
-                        `;
-                        document.head.appendChild(style);
-                    });
-                ''')
-                
-                # 设置视口大小
-                await page.set_viewport_size({"width": 1280, "height": 800})
-                
-                # 访问页面
-                await page.goto(self.screenshot_url, wait_until="networkidle", timeout=30000)
-                
-                # 等待字体加载
-                await page.wait_for_timeout(3000)
-                
-                # 截图
-                screenshot_bytes = await page.screenshot(full_page=True, type="png")
-                
-                await browser.close()
-            
+                try:
+                    context = await browser.new_context(
+                        locale='zh-CN',
+                    )
+                    page = await context.new_page()
+
+                    # 注入中文字体 CSS（使用 Google Fonts Noto Sans SC）
+                    await page.add_init_script('''
+                        // 等待 DOM 加载后注入字体
+                        document.addEventListener('DOMContentLoaded', function() {
+                            const link = document.createElement('link');
+                            link.href = 'https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap';
+                            link.rel = 'stylesheet';
+                            document.head.appendChild(link);
+
+                            // 设置全局字体
+                            const style = document.createElement('style');
+                            style.textContent = `
+                                * {
+                                    font-family: 'Noto Sans SC', 'Microsoft YaHei', 'SimHei', 'PingFang SC', sans-serif !important;
+                                }
+                            `;
+                            document.head.appendChild(style);
+                        });
+                    ''')
+
+                    # 设置视口大小
+                    await page.set_viewport_size({"width": 1280, "height": 800})
+
+                    # 访问页面
+                    response = await page.goto(self.screenshot_url, wait_until="networkidle", timeout=30000)
+                    if response is not None and response.status >= 400:
+                        raise RuntimeError(f"状态页 HTTP {response.status}")
+
+                    # 等待字体加载
+                    await page.wait_for_timeout(3000)
+
+                    # 截图
+                    screenshot_bytes = await page.screenshot(full_page=True, type="png")
+
+                finally:
+                    await browser.close()
+
             # 保存到插件数据目录
             import os
             data_dir = os.path.join("data", "plugin_data", "astrbot_plugin_awmc_maimaidx_status")
             os.makedirs(data_dir, exist_ok=True)
             screenshot_path = os.path.join(data_dir, "screenshot.png")
-            
+
             with open(screenshot_path, "wb") as f:
                 f.write(screenshot_bytes)
-            
+
             # 更新缓存
             self._last_screenshot_url = screenshot_path
-            self._last_screenshot_time = now
-            
+            self._last_screenshot_time = time.time()
+            self._screenshot_cached_at = monotonic()
+
             return screenshot_path
-            
+
         except Exception as e:
             logger.error(f"Playwright 截图失败: {e}")
-            
+
             # 回退：使用 text_to_image
             try:
                 group_blocks = await self.build_status_blocks()
@@ -283,7 +231,8 @@ class AwmcMaimaiStatusPlugin(Star):
                 url = await self.text_to_image(full_text)
                 if url:
                     self._last_screenshot_url = url
-                    self._last_screenshot_time = now
+                    self._last_screenshot_time = time.time()
+                    self._screenshot_cached_at = monotonic()
                     return url
             except Exception as e2:
                 logger.error(f"text_to_image 也失败: {e2}")
@@ -307,6 +256,11 @@ class AwmcMaimaiStatusPlugin(Star):
                 yield event.plain_result("正在获取截图，请稍候...")
                 screenshot_url = await self.get_screenshot_url()
                 if screenshot_url:
+                    yield event.plain_result(
+                        f"图片生成：{self.format_timestamp(self._last_screenshot_time)}"
+                        f"（最多缓存{self._cache_minutes}分钟）\n"
+                        "数据来源于 isMaiDown by Chongxi · https://mai.chongxi.us"
+                    )
                     yield event.image_result(screenshot_url)
                 else:
                     yield event.plain_result("截图失败，已切换到文本模式...")
@@ -322,11 +276,11 @@ class AwmcMaimaiStatusPlugin(Star):
                 # 合并转发模式（仅 OneBot v11 支持）
                 # 使用 Nodes 组件包装多个 Node
                 from astrbot.api.message_components import Nodes, Node, Plain
-                
+
                 # 获取机器人信息
                 self_id = event.get_self_id() or "10000"
                 self_name = "舞萌DX状态"
-                
+
                 # 创建所有 Node
                 forward_nodes = []
                 for block in group_blocks:
@@ -336,7 +290,7 @@ class AwmcMaimaiStatusPlugin(Star):
                         content=[Plain(text=block)]
                     )
                     forward_nodes.append(node)
-                
+
                 # 用 Nodes 包装（注意是复数 Nodes，不是 Forward）
                 nodes_msg = Nodes(nodes=forward_nodes)
                 yield event.chain_result([nodes_msg])
@@ -347,9 +301,9 @@ class AwmcMaimaiStatusPlugin(Star):
 
         except Exception as e:
             logger.error(f"舞萌DX 状态查询失败: {e}")
-            yield event.plain_result("舞萌DX 状态查询失败，请稍后重试或联系管理员检查 Status 服务。")
+            yield event.plain_result("舞萌DX 状态查询失败，请稍后重试或联系管理员检查 isMaiDown 服务。")
 
 
-@register("astrbot_plugin_awmc_maimaidx_status", "Blueteemo", "舞萌DX 服务器状态查询", "1.0.1")
+@register("astrbot_plugin_awmc_maimaidx_status", "Blueteemo", "舞萌DX 服务器状态查询", "1.1.0")
 def register_plugin(context: Context, config: AstrBotConfig):
     return AwmcMaimaiStatusPlugin(context, config)
